@@ -41,7 +41,8 @@ class AbstractAPI(object):
     def __init__(self, specification, base_path=None, arguments=None,
                  validate_responses=False, strict_validation=False, resolver=None,
                  auth_all_paths=False, debug=False, resolver_error_handler=None,
-                 validator_map=None, pythonic_params=False, options=None, **old_style_options):
+                 validator_map=None, pythonic_params=False, options=None, pass_context_arg_name=None,
+                 **old_style_options):
         """
         :type specification: pathlib.Path | dict
         :type base_path: str | None
@@ -61,6 +62,9 @@ class AbstractAPI(object):
         :type pythonic_params: bool
         :param options: New style options dictionary.
         :type options: dict | None
+        :param pass_context_arg_name: If not None URL request handling functions with an argument matching this name
+        will be passed the framework's request context.
+        :type pass_context_arg_name: str | None
         :param old_style_options: Old style options support for backward compatibility. Preference is
                                   what is defined in `options` parameter.
         """
@@ -97,7 +101,7 @@ class AbstractAPI(object):
 
         # Avoid validator having ability to modify specification
         spec = copy.deepcopy(self.specification)
-        validate_spec(spec)
+        self._validate_spec(spec)
 
         # https://github.com/swagger-api/swagger-spec/blob/master/versions/2.0.md#fixed-fields
         # If base_path is not on provided then we try to read it from the swagger.yaml or use / by default
@@ -130,6 +134,9 @@ class AbstractAPI(object):
         logger.debug('Pythonic params: %s', str(pythonic_params))
         self.pythonic_params = pythonic_params
 
+        logger.debug('pass_context_arg_name: %s', pass_context_arg_name)
+        self.pass_context_arg_name = pass_context_arg_name
+
         if self.options.openapi_spec_available:
             self.add_swagger_json()
 
@@ -140,6 +147,9 @@ class AbstractAPI(object):
 
         if auth_all_paths:
             self.add_auth_on_not_found(self.security, self.security_definitions)
+
+    def _validate_spec(self, spec):
+        validate_spec(spec)
 
     def _set_base_path(self, base_path):
         # type: (AnyStr) -> None
@@ -200,7 +210,9 @@ class AbstractAPI(object):
                               validator_map=self.validator_map,
                               strict_validation=self.strict_validation,
                               resolver=self.resolver,
-                              pythonic_params=self.pythonic_params)
+                              pythonic_params=self.pythonic_params,
+                              uri_parser_class=self.options.uri_parser_class,
+                              pass_context_arg_name=self.pass_context_arg_name)
         self._add_operation_internal(method, path, operation)
 
     @abc.abstractmethod

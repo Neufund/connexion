@@ -2,9 +2,6 @@ import functools
 import logging
 from copy import deepcopy
 
-from jsonschema import ValidationError
-
-from .decorators import validation
 from .decorators.decorator import (BeginOfRequestLifecycleDecorator,
                                    EndOfRequestLifecycleDecorator)
 from .decorators.metrics import UWSGIMetricsCollector
@@ -14,8 +11,8 @@ from .decorators.response import ResponseValidator
 from .decorators.security import (get_tokeninfo_func, get_tokeninfo_url,
                                   security_passthrough, verify_oauth_local,
                                   verify_oauth_remote)
-from .decorators.validation import (ParameterValidator, RequestBodyValidator,
-                                    TypeValidationError)
+from .decorators.uri_parsing import AlwaysMultiURIParser
+from .decorators.validation import ParameterValidator, RequestBodyValidator
 from .exceptions import InvalidSpecification
 from .utils import all_json, is_nullable
 
@@ -141,7 +138,8 @@ class Operation(SecureOperation):
                  path_parameters=None, app_security=None, security_definitions=None,
                  definitions=None, parameter_definitions=None, response_definitions=None,
                  validate_responses=False, strict_validation=False, randomize_endpoint=None,
-                 validator_map=None, pythonic_params=False):
+                 validator_map=None, pythonic_params=False, uri_parser_class=None,
+                 pass_context_arg_name=None):
         """
         This class uses the OperationID identify the module and function that will handle the operation
 
@@ -188,6 +186,11 @@ class Operation(SecureOperation):
         :param pythonic_params: When True CamelCase parameters are converted to snake_case and an underscore is appended
         to any shadowed built-ins
         :type pythonic_params: bool
+        :param uri_parser_class: A URI parser class that inherits from AbstractURIParser
+        :type uri_parser_class: AbstractURIParser
+        :param pass_context_arg_name: If not None will try to inject the request context to the function using this
+        name.
+        :type pass_context_arg_name: str|None
         """
 
         self.api = api
@@ -209,6 +212,8 @@ class Operation(SecureOperation):
         self.operation = operation
         self.randomize_endpoint = randomize_endpoint
         self.pythonic_params = pythonic_params
+        self.uri_parser_class = uri_parser_class or AlwaysMultiURIParser
+        self.pass_context_arg_name = pass_context_arg_name
 
         # todo support definition references
         # todo support references to application level parameters
@@ -223,18 +228,6 @@ class Operation(SecureOperation):
         resolution = resolver.resolve(self)
         self.operation_id = resolution.operation_id
         self.__undecorated_function = resolution.function
-
-        self.validate_defaults()
-
-    def validate_defaults(self):
-        for param in self.parameters:
-            try:
-                if param['in'] == 'query' and 'default' in param:
-                    validation.validate_type(param, param['default'], 'query', param['name'])
-            except (TypeValidationError, ValidationError):
-                raise InvalidSpecification('The parameter \'{param_name}\' has a default value which is not of'
-                                           ' type \'{param_type}\''.format(param_name=param['name'],
-                                                                           param_type=param['type']))
 
     def resolve_reference(self, schema):
         schema = deepcopy(schema)  # avoid changing the original schema
@@ -373,7 +366,8 @@ class Operation(SecureOperation):
         """
 
         function = parameter_to_arg(
-            self.parameters, self.consumes, self.__undecorated_function, self.pythonic_params)
+            self.parameters, self.consumes, self.__undecorated_function, self.pythonic_params,
+            self.pass_context_arg_name)
         function = self._request_begin_lifecycle_decorator(function)
 
         if self.validate_responses:
@@ -389,6 +383,10 @@ class Operation(SecureOperation):
         for validation_decorator in self.__validation_decorators:
             function = validation_decorator(function)
 
+        uri_parsing_decorator = self.__uri_parsing_decorator
+        logger.debug('... Adding uri parsing decorator (%r)', uri_parsing_decorator)
+        function = uri_parsing_decorator(function)
+
         # NOTE: the security decorator should be applied last to check auth before anything else :-)
         security_decorator = self.security_decorator
         logger.debug('... Adding security decorator (%r)', security_decorator)
@@ -401,6 +399,16 @@ class Operation(SecureOperation):
         function = self._request_end_lifecycle_decorator(function)
 
         return function
+
+    @property
+    def __uri_parsing_decorator(self):
+        """
+        Get uri parsing decorator
+
+        This decorator handles query and path parameter deduplication and
+        array types.
+        """
+        return self.uri_parser_class(self.parameters)
 
     @property
     def __content_type_decorator(self):
