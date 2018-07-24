@@ -18,7 +18,7 @@ def read_version(package):
                 return line.split()[-1].strip().strip("'")
 
 
-version = read_version('connexion')
+version = f"{read_version('connexion')}.neufund"
 
 install_requires = [
     'clickclick>=1.2',
