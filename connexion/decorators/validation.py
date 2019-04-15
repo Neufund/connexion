@@ -5,7 +5,8 @@ import logging
 import sys
 
 import six
-from jsonschema import Draft4Validator, ValidationError, draft4_format_checker
+from jsonschema import (Draft4Validator, ValidationError,
+                        draft4_format_checker, validators)
 from werkzeug import FileStorage
 
 from ..exceptions import ExtraParameterProblem
@@ -73,6 +74,38 @@ def validate_parameter_list(request_params, spec_params):
     return request_params.difference(spec_params)
 
 
+def extend_with_nullable_support(validator_class):
+    """Add support for null values in body.
+
+    It adds property validator to given validator_class.
+
+    :param validator_class: validator to add nullable support
+    :type validator_class: jsonschema.IValidator
+    :return: new validator with added nullable support in properties
+    :rtype: jsonschema.IValidator
+    """
+    validate_properties = validator_class.VALIDATORS['properties']
+
+    def nullable_support(validator, properties, instance, schema):
+        null_properties = {}
+        for property_, subschema in six.iteritems(properties):
+            if isinstance(instance, collections.Iterable) and \
+                    property_ in instance and \
+                    instance[property_] is None and \
+                    subschema.get('x-nullable') is True:
+                # exclude from following validation
+                null_properties[property_] = instance.pop(property_)
+        for error in validate_properties(validator, properties, instance, schema):
+            yield error
+        # add null properties back
+        if null_properties:
+            instance.update(null_properties)
+    return validators.extend(validator_class, {'properties': nullable_support})
+
+
+Draft4ValidatorSupportNullable = extend_with_nullable_support(Draft4Validator)
+
+
 class RequestBodyValidator(object):
     def __init__(self, schema, consumes, api, is_null_value_valid=False, validator=None):
         """
@@ -86,7 +119,7 @@ class RequestBodyValidator(object):
         self.consumes = consumes
         self.has_default = schema.get('default', False)
         self.is_null_value_valid = is_null_value_valid
-        validatorClass = validator or Draft4Validator
+        validatorClass = validator or Draft4ValidatorSupportNullable
         self.validator = validatorClass(schema, format_checker=draft4_format_checker)
         self.api = api
 
@@ -101,7 +134,8 @@ class RequestBodyValidator(object):
             if all_json(self.consumes):
                 data = request.json
 
-                if data is None and len(request.body) > 0 and not self.is_null_value_valid:
+                empty_body = not(request.body or request.form or request.files)
+                if data is None and not empty_body and not self.is_null_value_valid:
                     try:
                         ctype_is_json = is_json_mimetype(request.headers.get("Content-Type", ""))
                     except ValueError:
@@ -140,7 +174,8 @@ class RequestBodyValidator(object):
             self.validator.validate(data)
         except ValidationError as exception:
             logger.error("{url} validation error: {error}".format(url=url,
-                                                                  error=exception.message))
+                                                                  error=exception.message),
+                         extra={'validator': 'body'})
             return problem(400, 'Bad Request', str(exception.message))
 
         return None
@@ -154,7 +189,7 @@ class ResponseBodyValidator(object):
                           against API schema. Default is jsonschema.Draft4Validator.
         :type validator: jsonschema.IValidator
         """
-        ValidatorClass = validator or Draft4Validator
+        ValidatorClass = validator or Draft4ValidatorSupportNullable
         self.validator = ValidatorClass(schema, format_checker=draft4_format_checker)
 
     def validate_schema(self, data, url):
@@ -163,7 +198,8 @@ class ResponseBodyValidator(object):
             self.validator.validate(data)
         except ValidationError as exception:
             logger.error("{url} validation error: {error}".format(url=url,
-                                                                  error=exception))
+                                                                  error=exception),
+                         extra={'validator': 'response'})
             six.reraise(*sys.exc_info())
 
         return None
